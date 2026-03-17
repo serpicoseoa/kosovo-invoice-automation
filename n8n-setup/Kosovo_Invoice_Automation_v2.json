@@ -52,7 +52,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const fs   = require('fs');\nconst path = require('path');\nconst filePath = $json.filePath;\nconst fileName = $json.fileName;\nconst fileBuffer = fs.readFileSync(filePath);\nconst base64Data = fileBuffer.toString('base64');\nconst ext = path.extname(fileName).toLowerCase();\nconst mimeTypes = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };\nconst mimeType = mimeTypes[ext] || 'application/octet-stream';\nreturn {\n  json: { filePath, fileName },\n  binary: {\n    data: { data: base64Data, mimeType: mimeType, fileName: fileName }\n  }\n};"
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\nconst filePath = $json.filePath;\nconst fileName = $json.fileName;\nconst fileBuffer = fs.readFileSync(filePath);\nconst base64Data = fileBuffer.toString('base64');\nconst ext = path.extname(fileName).toLowerCase();\nconst mimeTypes = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };\nconst mimeType = mimeTypes[ext] || 'application/octet-stream';\nreturn {\n  json: { filePath, fileName },\n  binary: { data: { data: base64Data, mimeType: mimeType, fileName: fileName } }\n};"
       },
       "id": "n008",
       "name": "Read Invoice File",
@@ -94,7 +94,7 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "DYhjMrrXPyMmGBBs",
+          "id": "UAGKgMplIkw38tDY",
           "name": "Unstract Google Prompt API Key"
         }
       }
@@ -102,7 +102,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// ── POLL UNSTRACT UNTIL COMPLETE ─────────────────────────────────────────\n// POST response: { message: { execution_status, status_api, result } }\n// GET poll response: { status: 'COMPLETED'|'PENDING', message: [result array] }\n// Status values: PENDING, COMPLETED (from CeleryTaskState enum)\n\nconst { execSync } = require('child_process');\nconst uploadResp = $input.item.json;   // { message: { execution_status, status_api, result } }\nconst fileInfo   = $('Parse File List').item.json;\n\nconst UNSTRACT_KEY = 'YOUR_UNSTRACT_API_KEY_HERE';\nconst MAX_RETRIES  = 60;   // 60 x 10s = 10 min max\nconst POLL_SLEEP   = 10;   // seconds\n\nfunction poll(statusApiPath) {\n  const url = 'http://unstract-backend:8000' + statusApiPath;\n  const raw = execSync(\n    'wget -qO- --header=\"Authorization: Bearer ' + UNSTRACT_KEY + '\" \"' + url + '\"',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 30000 }\n  );\n  return JSON.parse(raw.trim());\n  // Returns: { status: 'COMPLETED'|'PENDING', message: resultArray|null }\n}\n\n// ── Determine if we need to poll ─────────────────────────────────────────\nconst msgBlock   = uploadResp.message || {};\nconst initStatus = msgBlock.execution_status || '';\nconst statusApi  = msgBlock.status_api || null;\n\nlet finalResult = null;  // will hold the result array\n\nif (initStatus === 'COMPLETED') {\n  // Synchronous response - result is directly available\n  finalResult = msgBlock.result;\n} else if (initStatus === 'PENDING' && statusApi) {\n  // Async - need to poll\n  let retries = 0;\n  while (retries < MAX_RETRIES) {\n    execSync('sleep ' + POLL_SLEEP, { shell: '/bin/sh' });\n    try {\n      const polled  = poll(statusApi);\n      const pollSt  = polled.status || '';\n      if (pollSt === 'COMPLETED') {\n        finalResult = polled.message;  // message IS the result array on GET\n        break;\n      }\n      if (pollSt !== 'PENDING') break;  // ERROR or unknown - stop polling\n    } catch(e) { /* transient - keep polling */ }\n    retries++;\n  }\n} else {\n  // Unexpected - try to use whatever came back\n  finalResult = msgBlock.result || null;\n}\n\n// ── Extract invoice data from result ─────────────────────────────────────\n// finalResult is an array like:\n// [ { file: 'name.pdf', result: { output: { key: { invoice_data, amounts, vat_classification } } } } ]\nlet extractedData = {};\nlet parseOk = false;\ntry {\n  if (Array.isArray(finalResult) && finalResult.length > 0) {\n    const item   = finalResult[0];\n    const output = item.result?.output || {};\n    const key    = Object.keys(output)[0];\n    if (key) { extractedData = output[key]; parseOk = true; }\n  }\n} catch(e) { extractedData = {}; parseOk = false; }\n\nreturn {\n  json: {\n    invoice_data:       extractedData.invoice_data       || {},\n    amounts:            extractedData.amounts            || {},\n    vat_classification: extractedData.vat_classification || {},\n    originalPath:       fileInfo.filePath,\n    fileName:           fileInfo.fileName,\n    parseOk:            parseOk\n  }\n};"
+        "jsCode": "const { execSync } = require('child_process');\nconst uploadResp = $input.item.json;\nconst fileInfo = $('Parse File List').item.json;\n\nconst UNSTRACT_KEY = 'YOUR_UNSTRACT_API_KEY_HERE';\nconst MAX_WAIT_MS = 600000;\nconst POLL_INTERVAL_MS = 10000;\n\nfunction spinWait(ms) {\n  const end = Date.now() + ms;\n  while (Date.now() < end) { /* spin */ }\n}\n\nfunction poll(statusApiPath) {\n  const url = 'http://unstract-backend:8000' + statusApiPath;\n  const raw = execSync(\n    'wget -qO- --header=\"Authorization: Bearer ' + UNSTRACT_KEY + '\" \"' + url + '\"',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 30000 }\n  );\n  return JSON.parse(raw.trim());\n}\n\nconst msgBlock = uploadResp.message || {};\nconst initStatus = msgBlock.execution_status || '';\nconst statusApi = msgBlock.status_api || null;\nlet finalResult = null;\n\nif (initStatus === 'COMPLETED') {\n  finalResult = msgBlock.result;\n} else if (initStatus === 'PENDING' && statusApi) {\n  const deadline = Date.now() + MAX_WAIT_MS;\n  while (Date.now() < deadline) {\n    spinWait(POLL_INTERVAL_MS);\n    try {\n      const polled = poll(statusApi);\n      const st = polled.status || '';\n      if (st === 'COMPLETED') { finalResult = polled.message; break; }\n      if (st !== 'PENDING') { break; }\n    } catch(e) { /* transient */ }\n  }\n} else {\n  finalResult = msgBlock.result || null;\n}\n\nlet extractedData = {};\nlet parseOk = false;\ntry {\n  if (Array.isArray(finalResult) && finalResult.length > 0) {\n    const output = finalResult[0].result?.output || {};\n    const key = Object.keys(output)[0];\n    if (key) { extractedData = output[key]; parseOk = true; }\n  }\n} catch(e) { extractedData = {}; parseOk = false; }\n\nreturn {\n  json: {\n    invoice_data: extractedData.invoice_data || {},\n    amounts: extractedData.amounts || {},\n    vat_classification: extractedData.vat_classification || {},\n    originalPath: fileInfo.filePath,\n    fileName: fileInfo.fileName,\n    parseOk: parseOk\n  }\n};"
       },
       "id": "n010",
       "name": "Poll & Parse Unstract Result",
@@ -116,7 +116,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const d   = $input.item.json;\nconst inv = d.invoice_data || {};\nconst amt = d.amounts      || {};\nconst errors = [];\nif (!inv['Data'] || String(inv['Data']).trim() === '')                        errors.push('missing_date');\nif (!inv[\"'Numri i fatur\\u00ebs\"] && !inv['Numri i fatur\\u00ebs'])            errors.push('missing_invoice_number');\nif (!inv['Emri i shit\\u00ebsit'] || String(inv['Emri i shit\\u00ebsit']).trim() === '') errors.push('missing_supplier');\nconst hasAmount = Object.values(amt).some(v => { const n = parseFloat(v); return !isNaN(n) && n > 0; });\nif (!hasAmount) errors.push('no_positive_amounts');\nreturn { json: { ...d, validation_passed: errors.length === 0, validation_errors: errors } };"
+        "jsCode": "const d = $input.item.json;\nconst inv = d.invoice_data || {};\nconst amt = d.amounts || {};\nconst errors = [];\nif (!inv['Data'] || String(inv['Data']).trim() === '') errors.push('missing_date');\nif (!inv[\"'Numri i fatur\\u00ebs\"] && !inv['Numri i fatur\\u00ebs']) errors.push('missing_invoice_number');\nif (!inv['Emri i shit\\u00ebsit'] || String(inv['Emri i shit\\u00ebsit']).trim() === '') errors.push('missing_supplier');\nconst hasAmount = Object.values(amt).some(v => { const n = parseFloat(v); return !isNaN(n) && n > 0; });\nif (!hasAmount) errors.push('no_positive_amounts');\nreturn { json: { ...d, validation_passed: errors.length === 0, validation_errors: errors } };"
       },
       "id": "n011",
       "name": "Validate Fields",
@@ -162,7 +162,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const { execSync } = require('child_process');\nconst originalPath   = String($json.originalPath || '');\nconst fileName       = String($json.fileName     || 'unknown');\nconst validationErrs = Array.isArray($json.validation_errors)\n  ? $json.validation_errors.map(String).join(',')\n  : String($json.validation_errors || '');\ntry {\n  execSync(\n    'mkdir -p /data/invoices/Review && ts=$(date +%Y%m%d_%H%M%S) && mv \"' + originalPath + '\" \"/data/invoices/Review/' + fileName + '-FAILED-$ts\"',\n    { encoding: 'utf8', shell: '/bin/sh' }\n  );\n  return { json: { status: 'routed_to_review', fileName: fileName, errors: validationErrs } };\n} catch(e) {\n  return { json: { status: 'move_error', fileName: fileName, error: String(e.message) } };\n}"
+        "jsCode": "const { execSync } = require('child_process');\nconst originalPath = String($json.originalPath || '');\nconst fileName = String($json.fileName || 'unknown');\nconst validationErrs = Array.isArray($json.validation_errors)\n  ? $json.validation_errors.map(String).join(',')\n  : String($json.validation_errors || '');\ntry {\n  execSync(\n    'mkdir -p /data/invoices/Review && ts=$(date +%Y%m%d_%H%M%S) && mv \"' + originalPath + '\" \"/data/invoices/Review/' + fileName + '-FAILED-$ts\"',\n    { encoding: 'utf8', shell: '/bin/sh' }\n  );\n  return { json: { status: 'routed_to_review', fileName: fileName, errors: validationErrs } };\n} catch(e) {\n  return { json: { status: 'move_error', fileName: fileName, error: String(e.message) } };\n}"
       },
       "id": "n013",
       "name": "Route to Review",
@@ -176,7 +176,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const data = $input.item.json;\nconst inv  = data.invoice_data || {};\nconst jsonForExcel  = { invoice_data: data.invoice_data, amounts: data.amounts, vat_classification: data.vat_classification };\nconst excelBase64   = Buffer.from(JSON.stringify(jsonForExcel),        'utf8').toString('base64');\nconst archiveBase64 = Buffer.from(JSON.stringify(data.invoice_data),  'utf8').toString('base64');\nconst supplier = (inv['Emri i shit\\u00ebsit'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*]/g,'_').trim();\nconst date     = (inv['Data'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*]/g,'_');\nconst invNum   = (inv[\"'Numri i fatur\\u00ebs\"] || inv['Numri i fatur\\u00ebs'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*']/g,'_');\nreturn { json: { excelBase64, archiveBase64, originalPath: data.originalPath, fileName: data.fileName, archiveSupplier: supplier, archiveDate: date, archiveInvNum: invNum } };"
+        "jsCode": "const data = $input.item.json;\nconst inv = data.invoice_data || {};\nconst jsonForExcel = { invoice_data: data.invoice_data, amounts: data.amounts, vat_classification: data.vat_classification };\nconst excelBase64 = Buffer.from(JSON.stringify(jsonForExcel), 'utf8').toString('base64');\nconst archiveBase64 = Buffer.from(JSON.stringify(data.invoice_data), 'utf8').toString('base64');\nconst supplier = (inv['Emri i shit\\u00ebsit'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*]/g,'_').trim();\nconst date = (inv['Data'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*]/g,'_');\nconst invNum = (inv[\"'Numri i fatur\\u00ebs\"] || inv['Numri i fatur\\u00ebs'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*']/g,'_');\nreturn { json: { excelBase64, archiveBase64, originalPath: data.originalPath, fileName: data.fileName, archiveSupplier: supplier, archiveDate: date, archiveInvNum: invNum } };"
       },
       "id": "n014",
       "name": "Prepare JSON Base64",
@@ -204,7 +204,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const { execSync } = require('child_process');\nconst prepData      = $('Prepare JSON Base64').item.json;\nconst archiveBase64 = prepData.archiveBase64;\nconst originalPath  = prepData.originalPath;\ntry {\n  const result = execSync(\n    'mkdir -p /data/invoices/Completed && echo ' + archiveBase64 + ' | base64 -d | python3 /scripts/archive_lb_invoice.py \"' + originalPath + '\" /data/invoices/Completed',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 30000 }\n  );\n  return { json: { stdout: result, status: 'archived' } };\n} catch(e) {\n  return { json: { stdout: '', stderr: String(e.message), status: 'archive_error' } };\n}"
+        "jsCode": "const { execSync } = require('child_process');\nconst prepData = $('Prepare JSON Base64').item.json;\nconst archiveBase64 = prepData.archiveBase64;\nconst originalPath = prepData.originalPath;\ntry {\n  const result = execSync(\n    'mkdir -p /data/invoices/Completed && echo ' + archiveBase64 + ' | base64 -d | python3 /scripts/archive_lb_invoice.py \"' + originalPath + '\" /data/invoices/Completed',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 30000 }\n  );\n  return { json: { stdout: result, status: 'archived' } };\n} catch(e) {\n  return { json: { stdout: '', stderr: String(e.message), status: 'archive_error' } };\n}"
       },
       "id": "n017",
       "name": "Archive Invoice",
@@ -361,11 +361,10 @@
     "saveManualExecutions": true,
     "saveExecutionProgress": true,
     "callerPolicy": "workflowsFromSameOwner",
-    "availableInMCP": false,
-    "executionOrder": "v1"
+    "availableInMCP": false
   },
   "meta": {
     "exportedAt": "2026-03-17",
-    "version": "2.0"
+    "fix": "spinWait-heartbeat"
   }
 }
