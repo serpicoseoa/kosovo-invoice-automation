@@ -1,0 +1,209 @@
+# ================================================================
+# Kosovo Invoice Automation — Interactive Configuration Script
+# Run ONCE on a new machine. Updates ALL files automatically.
+# ================================================================
+# Usage: powershell -ExecutionPolicy Bypass -File configure.ps1
+# ================================================================
+
+$ErrorActionPreference = "Stop"
+$REPO_ROOT   = $PSScriptRoot
+$N8N_SETUP   = Join-Path $REPO_ROOT "n8n-setup"
+$WF_JSON     = Join-Path $N8N_SETUP "Kosovo_Invoice_Automation_v2.json"
+$ENV_FILE    = Join-Path $N8N_SETUP ".env"
+$DC_FILE     = Join-Path $N8N_SETUP "docker-compose.yml"
+
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Kosovo Invoice Automation — One-Time Configuration Setup  " -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  Answer each question. Press Enter to use the [default].   "
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# ── Helper ──────────────────────────────────────────────────────
+function Ask($prompt, $default) {
+    $label = if ($default) { "$prompt [`e[33m$default`e[0m]" } else { "$prompt" }
+    $val   = Read-Host $label
+    if ([string]::IsNullOrWhiteSpace($val)) { return $default }
+    return $val
+}
+function AskSecret($prompt) {
+    $val = Read-Host $prompt -AsSecureString
+    return [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($val))
+}
+
+# ── 1. Windows paths ─────────────────────────────────────────────
+Write-Host "── STEP 1: Folder Paths ───────────────────────────────────" -ForegroundColor Yellow
+Write-Host "  These are Windows paths on THIS machine."
+Write-Host "  Use forward slashes (C:/Users/...) or backslashes — both work."
+Write-Host ""
+
+$defaultUser    = $env:USERNAME
+$invoicesPath   = Ask "  Invoice folder path" "C:/Users/$defaultUser/Dropbox/Test/Invoices"
+$scriptsPath    = Ask "  Scripts folder path" "C:/invoice-automation/scripts"
+$bankPath       = Ask "  Bank statements path" "C:/Users/$defaultUser/Dropbox/Test/BankStatements"
+
+# normalise to forward slashes
+$invoicesPath = $invoicesPath.Replace('\','/')
+$scriptsPath  = $scriptsPath.Replace('\','/')
+$bankPath     = $bankPath.Replace('\','/')
+
+# ── 2. Unstract settings ─────────────────────────────────────────
+Write-Host ""
+Write-Host "── STEP 2: Unstract Settings ──────────────────────────────" -ForegroundColor Yellow
+Write-Host "  Find your API key in Unstract → API Deployments → your deployment → API Key"
+Write-Host ""
+
+$unstractKey     = Ask "  Unstract API Key" ""
+$unstractOrg     = Ask "  Unstract org slug (from URL)" "mock_org"
+$unstractApiName = Ask "  Unstract API deployment name" "google_prompt"
+
+# ── 3. n8n credentials ───────────────────────────────────────────
+Write-Host ""
+Write-Host "── STEP 3: n8n Login ──────────────────────────────────────" -ForegroundColor Yellow
+
+$n8nUser     = Ask "  n8n admin username" "admin"
+$n8nPassword = Ask "  n8n admin password" "SecureAccounting2025!"
+$n8nKey      = python -c "import secrets; print(secrets.token_hex(32))" 2>$null
+if (-not $n8nKey) { $n8nKey = [guid]::NewGuid().ToString().Replace('-','') + [guid]::NewGuid().ToString().Replace('-','').Substring(0,8) }
+Write-Host "  Encryption key: auto-generated" -ForegroundColor DarkGray
+
+# ── 4. Timezone ──────────────────────────────────────────────────
+Write-Host ""
+Write-Host "── STEP 4: Timezone ───────────────────────────────────────" -ForegroundColor Yellow
+$timezone = Ask "  Timezone (IANA format)" "Europe/Vienna"
+
+# ── SUMMARY ──────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "── Configuration Summary ──────────────────────────────────" -ForegroundColor Cyan
+Write-Host "  Invoices path   : $invoicesPath"
+Write-Host "  Scripts path    : $scriptsPath"
+Write-Host "  Bank path       : $bankPath"
+Write-Host "  Unstract org    : $unstractOrg"
+Write-Host "  Unstract API    : $unstractApiName"
+Write-Host "  Unstract key    : $($unstractKey.Substring(0,8))..." -ForegroundColor DarkGray
+Write-Host "  n8n user        : $n8nUser"
+Write-Host "  n8n password    : ********"
+Write-Host "  Timezone        : $timezone"
+Write-Host ""
+$confirm = Read-Host "  Apply this configuration? (Y/n)"
+if ($confirm -eq 'n' -or $confirm -eq 'N') { Write-Host "Aborted."; exit 0 }
+
+# ================================================================
+# APPLY CONFIGURATION TO ALL FILES
+# ================================================================
+
+Write-Host ""
+Write-Host "Applying configuration..." -ForegroundColor Green
+
+# ── FILE 1: Write .env ───────────────────────────────────────────
+Write-Host "  [1/4] Writing .env ..."
+$envContent = @"
+# Kosovo Invoice Automation — Environment Configuration
+# Generated by configure.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+# DO NOT commit this file to Git
+
+N8N_ENCRYPTION_KEY=$n8nKey
+N8N_BASIC_AUTH_USER=$n8nUser
+N8N_BASIC_AUTH_PASSWORD=$n8nPassword
+INVOICES_PATH=$invoicesPath
+SCRIPTS_PATH=$scriptsPath
+BANK_STATEMENTS_PATH=$bankPath
+UNSTRACT_API_KEY=$unstractKey
+UNSTRACT_ORG=$unstractOrg
+UNSTRACT_API_NAME=$unstractApiName
+GENERIC_TIMEZONE=$timezone
+TZ=$timezone
+"@
+Set-Content -Path $ENV_FILE -Value $envContent -Encoding UTF8
+Write-Host "    Saved: $ENV_FILE" -ForegroundColor DarkGray
+
+# ── FILE 2: Patch docker-compose.yml ─────────────────────────────
+Write-Host "  [2/4] Patching docker-compose.yml ..."
+$dc = Get-Content $DC_FILE -Raw
+# Replace hardcoded alban defaults with new paths
+$dc = $dc -replace 'C:/Users/alban/Dropbox/Test/Invoices', $invoicesPath
+$dc = $dc -replace 'C:/invoice-automation/scripts', $scriptsPath
+$dc = $dc -replace 'C:/Users/alban/Dropbox/Test/BankStatements', $bankPath
+$dc = $dc -replace 'Europe/Vienna', $timezone
+Set-Content -Path $DC_FILE -Value $dc -Encoding UTF8
+Write-Host "    Saved: $DC_FILE" -ForegroundColor DarkGray
+
+# ── FILE 3: Patch n8n workflow JSON ──────────────────────────────
+Write-Host "  [3/4] Patching n8n workflow JSON ..."
+$wf = Get-Content $WF_JSON -Raw -Encoding UTF8
+
+# Replace Unstract URL (org + api name)
+$oldUrl = "http://unstract-backend:8000/deployment/api/mock_org/google_prompt/"
+$newUrl = "http://unstract-backend:8000/deployment/api/$unstractOrg/$unstractApiName/"
+$wf = $wf -replace [regex]::Escape($oldUrl), $newUrl
+
+# Replace hardcoded API key in Poll node
+$wf = $wf -replace "fd0be776-0885-4a15-9d20-16e666b06f96", $unstractKey
+
+# Also replace the status_api base URL pattern inside Poll node
+$oldBase = "http://unstract-backend:8000"
+# This one stays the same (Docker hostname) so we don't touch it
+
+Set-Content -Path $WF_JSON -Value $wf -Encoding UTF8
+Write-Host "    Saved: $WF_JSON" -ForegroundColor DarkGray
+
+# ── FILE 4: Create all folders ────────────────────────────────────
+Write-Host "  [4/4] Creating folder structure ..."
+$folders = @(
+    $invoicesPath,
+    "$invoicesPath/Completed",
+    "$invoicesPath/Review",
+    "$invoicesPath/Review/OCR_Failed",
+    "$invoicesPath/Review/Duplicates",
+    $scriptsPath
+)
+foreach ($f in $folders) {
+    $winPath = $f.Replace('/', '\')
+    if (-not (Test-Path $winPath)) {
+        New-Item -ItemType Directory -Force -Path $winPath | Out-Null
+        Write-Host "    Created: $winPath" -ForegroundColor DarkGray
+    } else {
+        Write-Host "    Exists:  $winPath" -ForegroundColor DarkGray
+    }
+}
+
+# Copy scripts to scripts path
+$winScripts = $scriptsPath.Replace('/', '\')
+Copy-Item "$REPO_ROOT\scripts\*.py"            $winScripts -Force
+Copy-Item "$REPO_ROOT\scripts\requirements.txt" $winScripts -Force
+Write-Host "    Scripts copied to: $winScripts" -ForegroundColor DarkGray
+
+# ── DONE ────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host "  Configuration complete! All files updated." -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Files updated:" -ForegroundColor Cyan
+Write-Host "    n8n-setup/.env                            ← secrets + paths"
+Write-Host "    n8n-setup/docker-compose.yml              ← volume mounts"
+Write-Host "    n8n-setup/Kosovo_Invoice_Automation_v2.json ← Unstract URL + API key"
+Write-Host ""
+Write-Host "  Next steps:" -ForegroundColor Yellow
+Write-Host "    1. Make sure Docker Desktop is running"
+Write-Host "    2. Make sure Unstract is running:"
+Write-Host "       cd C:\Users\alban\UnstractNew\docker"
+Write-Host "       docker-compose up -d"
+Write-Host "    3. Build and start n8n:"
+Write-Host "       cd $N8N_SETUP"
+Write-Host "       docker-compose build"
+Write-Host "       docker-compose up -d"
+Write-Host "    4. Open http://localhost:5678 and import the workflow:"
+Write-Host "       n8n-setup\Kosovo_Invoice_Automation_v2.json"
+Write-Host "    5. Create credential 'Unstract Google Prompt API Key' in n8n:"
+Write-Host "       Settings → Credentials → New → HTTP Header Auth"
+Write-Host "       Header Name: Authorization"
+Write-Host "       Header Value: Bearer $($unstractKey.Substring(0,8))..."
+Write-Host "    6. Assign credential to 'Upload to Unstract' node"
+Write-Host "    7. Activate the workflow"
+Write-Host ""
+Write-Host "  Your invoices folder: $invoicesPath" -ForegroundColor Cyan
+Write-Host "  Drop PDFs there and they will be processed automatically."
+Write-Host ""
