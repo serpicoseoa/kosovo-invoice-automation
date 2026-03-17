@@ -1,0 +1,371 @@
+{
+  "name": "Kosovo Invoice Automation v2.0 - LB VAT",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "n001",
+      "name": "Poll Every 30s",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1328,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const { execSync } = require('child_process');\ntry {\n  const result = execSync(\n    'ls -1 /data/invoices/*.pdf /data/invoices/*.PDF /data/invoices/*.jpg /data/invoices/*.JPG /data/invoices/*.jpeg /data/invoices/*.JPEG 2>/dev/null || echo \"\"',\n    { encoding: 'utf8', shell: '/bin/sh' }\n  );\n  return [{ json: { stdout: result } }];\n} catch(e) {\n  return [{ json: { stdout: '' } }];\n}"
+      },
+      "id": "n002",
+      "name": "List Invoice Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1104,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const stdout = $input.first().json.stdout || '';\nconst files = stdout.trim().split('\\n').filter(f => {\n  const trimmed = f.trim();\n  return trimmed.length > 0 && trimmed !== \"''\" && trimmed !== \"'\";\n});\nif (files.length === 0) { return []; }\nreturn files.map(filePath => ({\n  json: {\n    filePath: filePath.trim(),\n    fileName: filePath.trim().split('/').pop()\n  }\n}));"
+      },
+      "id": "n003",
+      "name": "Parse File List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const fs   = require('fs');\nconst path = require('path');\nconst filePath = $json.filePath;\nconst fileName = $json.fileName;\nconst fileBuffer = fs.readFileSync(filePath);\nconst base64Data = fileBuffer.toString('base64');\nconst ext = path.extname(fileName).toLowerCase();\nconst mimeTypes = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };\nconst mimeType = mimeTypes[ext] || 'application/octet-stream';\nreturn {\n  json: { filePath, fileName },\n  binary: {\n    data: { data: base64Data, mimeType: mimeType, fileName: fileName }\n  }\n};"
+      },
+      "id": "n008",
+      "name": "Read Invoice File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://unstract-backend:8000/deployment/api/mock_org/google_prompt/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "n009",
+      "name": "Upload to Unstract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -432,
+        144
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DYhjMrrXPyMmGBBs",
+          "name": "Unstract Google Prompt API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ── POLL UNSTRACT UNTIL COMPLETE ─────────────────────────────────────────\n// POST response: { message: { execution_status, status_api, result } }\n// GET poll response: { status: 'COMPLETED'|'PENDING', message: [result array] }\n// Status values: PENDING, COMPLETED (from CeleryTaskState enum)\n\nconst { execSync } = require('child_process');\nconst uploadResp = $input.item.json;   // { message: { execution_status, status_api, result } }\nconst fileInfo   = $('Parse File List').item.json;\n\nconst UNSTRACT_KEY = 'fd0be776-0885-4a15-9d20-16e666b06f96';\nconst MAX_RETRIES  = 60;   // 60 x 10s = 10 min max\nconst POLL_SLEEP   = 10;   // seconds\n\nfunction poll(statusApiPath) {\n  const url = 'http://unstract-backend:8000' + statusApiPath;\n  const raw = execSync(\n    'wget -qO- --header=\"Authorization: Bearer ' + UNSTRACT_KEY + '\" \"' + url + '\"',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 30000 }\n  );\n  return JSON.parse(raw.trim());\n  // Returns: { status: 'COMPLETED'|'PENDING', message: resultArray|null }\n}\n\n// ── Determine if we need to poll ─────────────────────────────────────────\nconst msgBlock   = uploadResp.message || {};\nconst initStatus = msgBlock.execution_status || '';\nconst statusApi  = msgBlock.status_api || null;\n\nlet finalResult = null;  // will hold the result array\n\nif (initStatus === 'COMPLETED') {\n  // Synchronous response - result is directly available\n  finalResult = msgBlock.result;\n} else if (initStatus === 'PENDING' && statusApi) {\n  // Async - need to poll\n  let retries = 0;\n  while (retries < MAX_RETRIES) {\n    execSync('sleep ' + POLL_SLEEP, { shell: '/bin/sh' });\n    try {\n      const polled  = poll(statusApi);\n      const pollSt  = polled.status || '';\n      if (pollSt === 'COMPLETED') {\n        finalResult = polled.message;  // message IS the result array on GET\n        break;\n      }\n      if (pollSt !== 'PENDING') break;  // ERROR or unknown - stop polling\n    } catch(e) { /* transient - keep polling */ }\n    retries++;\n  }\n} else {\n  // Unexpected - try to use whatever came back\n  finalResult = msgBlock.result || null;\n}\n\n// ── Extract invoice data from result ─────────────────────────────────────\n// finalResult is an array like:\n// [ { file: 'name.pdf', result: { output: { key: { invoice_data, amounts, vat_classification } } } } ]\nlet extractedData = {};\nlet parseOk = false;\ntry {\n  if (Array.isArray(finalResult) && finalResult.length > 0) {\n    const item   = finalResult[0];\n    const output = item.result?.output || {};\n    const key    = Object.keys(output)[0];\n    if (key) { extractedData = output[key]; parseOk = true; }\n  }\n} catch(e) { extractedData = {}; parseOk = false; }\n\nreturn {\n  json: {\n    invoice_data:       extractedData.invoice_data       || {},\n    amounts:            extractedData.amounts            || {},\n    vat_classification: extractedData.vat_classification || {},\n    originalPath:       fileInfo.filePath,\n    fileName:           fileInfo.fileName,\n    parseOk:            parseOk\n  }\n};"
+      },
+      "id": "n010",
+      "name": "Poll & Parse Unstract Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const d   = $input.item.json;\nconst inv = d.invoice_data || {};\nconst amt = d.amounts      || {};\nconst errors = [];\nif (!inv['Data'] || String(inv['Data']).trim() === '')                        errors.push('missing_date');\nif (!inv[\"'Numri i fatur\\u00ebs\"] && !inv['Numri i fatur\\u00ebs'])            errors.push('missing_invoice_number');\nif (!inv['Emri i shit\\u00ebsit'] || String(inv['Emri i shit\\u00ebsit']).trim() === '') errors.push('missing_supplier');\nconst hasAmount = Object.values(amt).some(v => { const n = parseFloat(v); return !isNaN(n) && n > 0; });\nif (!hasAmount) errors.push('no_positive_amounts');\nreturn { json: { ...d, validation_passed: errors.length === 0, validation_errors: errors } };"
+      },
+      "id": "n011",
+      "name": "Validate Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "valid-cond-01",
+              "leftValue": "={{ $json.validation_passed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n012",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        240,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { execSync } = require('child_process');\nconst originalPath   = String($json.originalPath || '');\nconst fileName       = String($json.fileName     || 'unknown');\nconst validationErrs = Array.isArray($json.validation_errors)\n  ? $json.validation_errors.map(String).join(',')\n  : String($json.validation_errors || '');\ntry {\n  execSync(\n    'mkdir -p /data/invoices/Review && ts=$(date +%Y%m%d_%H%M%S) && mv \"' + originalPath + '\" \"/data/invoices/Review/' + fileName + '-FAILED-$ts\"',\n    { encoding: 'utf8', shell: '/bin/sh' }\n  );\n  return { json: { status: 'routed_to_review', fileName: fileName, errors: validationErrs } };\n} catch(e) {\n  return { json: { status: 'move_error', fileName: fileName, error: String(e.message) } };\n}"
+      },
+      "id": "n013",
+      "name": "Route to Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const data = $input.item.json;\nconst inv  = data.invoice_data || {};\nconst jsonForExcel  = { invoice_data: data.invoice_data, amounts: data.amounts, vat_classification: data.vat_classification };\nconst excelBase64   = Buffer.from(JSON.stringify(jsonForExcel),        'utf8').toString('base64');\nconst archiveBase64 = Buffer.from(JSON.stringify(data.invoice_data),  'utf8').toString('base64');\nconst supplier = (inv['Emri i shit\\u00ebsit'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*]/g,'_').trim();\nconst date     = (inv['Data'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*]/g,'_');\nconst invNum   = (inv[\"'Numri i fatur\\u00ebs\"] || inv['Numri i fatur\\u00ebs'] || 'UNKNOWN').replace(/[<>:\"/\\\\|?*']/g,'_');\nreturn { json: { excelBase64, archiveBase64, originalPath: data.originalPath, fileName: data.fileName, archiveSupplier: supplier, archiveDate: date, archiveInvNum: invNum } };"
+      },
+      "id": "n014",
+      "name": "Prepare JSON Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { execSync } = require('child_process');\nconst excelBase64 = $json.excelBase64;\ntry {\n  const result = execSync(\n    'echo ' + excelBase64 + ' | base64 -d | python3 /scripts/excel_writer_lb.py /data/invoices/LB.xlsx',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 60000 }\n  );\n  return { json: { stdout: result, status: 'excel_written' } };\n} catch(e) {\n  return { json: { stdout: '', stderr: String(e.message), status: 'excel_error' } };\n}"
+      },
+      "id": "n015",
+      "name": "Write to Excel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const { execSync } = require('child_process');\nconst prepData      = $('Prepare JSON Base64').item.json;\nconst archiveBase64 = prepData.archiveBase64;\nconst originalPath  = prepData.originalPath;\ntry {\n  const result = execSync(\n    'mkdir -p /data/invoices/Completed && echo ' + archiveBase64 + ' | base64 -d | python3 /scripts/archive_lb_invoice.py \"' + originalPath + '\" /data/invoices/Completed',\n    { encoding: 'utf8', shell: '/bin/sh', timeout: 30000 }\n  );\n  return { json: { stdout: result, status: 'archived' } };\n} catch(e) {\n  return { json: { stdout: '', stderr: String(e.message), status: 'archive_error' } };\n}"
+      },
+      "id": "n017",
+      "name": "Archive Invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        144
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "n018",
+      "name": "Success",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1136,
+        144
+      ]
+    }
+  ],
+  "connections": {
+    "Poll Every 30s": {
+      "main": [
+        [
+          {
+            "node": "List Invoice Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Invoice Files": {
+      "main": [
+        [
+          {
+            "node": "Parse File List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse File List": {
+      "main": [
+        [
+          {
+            "node": "Read Invoice File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Invoice File": {
+      "main": [
+        [
+          {
+            "node": "Upload to Unstract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Unstract": {
+      "main": [
+        [
+          {
+            "node": "Poll & Parse Unstract Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll & Parse Unstract Result": {
+      "main": [
+        [
+          {
+            "node": "Validate Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Fields": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare JSON Base64",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route to Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare JSON Base64": {
+      "main": [
+        [
+          {
+            "node": "Write to Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write to Excel": {
+      "main": [
+        [
+          {
+            "node": "Archive Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive Invoice": {
+      "main": [
+        [
+          {
+            "node": "Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "exportedAt": "2026-03-17",
+    "version": "2.0"
+  }
+}
