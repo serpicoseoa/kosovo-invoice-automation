@@ -20,8 +20,8 @@ services:
       - N8N_PROTOCOL=http
       - N8N_PUBLIC_API_DISABLED=false
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - GENERIC_TIMEZONE=Europe/Vienna
-      - TZ=Europe/Vienna
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-Europe/Vienna}
+      - TZ=${TZ:-Europe/Vienna}
       - DB_TYPE=sqlite
       - WEBHOOK_URL=http://localhost:5678/
       - N8N_CONCURRENCY_PRODUCTION_LIMIT=1
@@ -31,10 +31,10 @@ services:
       - EXECUTIONS_DATA_PRUNE=true
     volumes:
       - n8n_data:/home/node/.n8n
-      # UPDATE THESE PATHS for your machine:
-      - ${INVOICES_PATH:-C:/Users/alban/Dropbox/Test/Invoices}:/data/invoices:rw
-      - ${SCRIPTS_PATH:-C:/invoice-automation/scripts}:/scripts:ro
-      - ${BANK_STATEMENTS_PATH:-C:/Users/alban/Dropbox/Test/BankStatements}:/data/bank-statements:rw
+      # Paths are set by configure.ps1 in .env — do not edit manually
+      - ${INVOICES_PATH}:/data/invoices:rw
+      - ${SCRIPTS_PATH}:/scripts:ro
+      - ${BANK_STATEMENTS_PATH}:/data/bank-statements:rw
     networks:
       - default
       - unstract-network
