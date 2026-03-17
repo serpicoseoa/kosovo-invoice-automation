@@ -1,0 +1,45 @@
+# .gitignore — Kosovo Invoice Automation
+# Never commit these files
+
+# Secrets
+.env
+*.key
+*.pem
+
+# n8n databases (contain encrypted credentials)
+*.sqlite
+database-*.sqlite
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+*.log
+n8nEventLog*.log
+
+# Invoice data (keep out of git - contains financial documents)
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.xlsx
+*.xls
+
+# Checksums registry (machine-specific)
+checksums_db.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+.docker/
+
+# Temp
+*.tmp
+/tmp/
