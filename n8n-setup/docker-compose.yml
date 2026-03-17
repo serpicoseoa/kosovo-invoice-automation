@@ -1,0 +1,56 @@
+services:
+  n8n:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: n8n-custom-python:latest
+    container_name: n8n-setup-n8n-1
+    restart: always
+    user: root
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD:-changeme}
+      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+      - N8N_SECURE_COOKIE=false
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_PUBLIC_API_DISABLED=false
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - GENERIC_TIMEZONE=Europe/Vienna
+      - TZ=Europe/Vienna
+      - DB_TYPE=sqlite
+      - WEBHOOK_URL=http://localhost:5678/
+      - N8N_CONCURRENCY_PRODUCTION_LIMIT=1
+      - NODE_FUNCTION_ALLOW_BUILTIN=*
+      - NODE_FUNCTION_ALLOW_EXTERNAL=*
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - EXECUTIONS_DATA_PRUNE=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # UPDATE THESE PATHS for your machine:
+      - ${INVOICES_PATH:-C:/Users/alban/Dropbox/Test/Invoices}:/data/invoices:rw
+      - ${SCRIPTS_PATH:-C:/invoice-automation/scripts}:/scripts:ro
+      - ${BANK_STATEMENTS_PATH:-C:/Users/alban/Dropbox/Test/BankStatements}:/data/bank-statements:rw
+    networks:
+      - default
+      - unstract-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  n8n_data:
+    driver: local
+
+networks:
+  default:
+    driver: bridge
+  unstract-network:
+    external: true
+    name: unstract-network
